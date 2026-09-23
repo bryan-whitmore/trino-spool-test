@@ -71,10 +71,13 @@ public final class Bench
 
         Properties props = new Properties();
         props.setProperty("user", user);
-        // "none" leaves the property unset, which is what makes the run a
-        // true baseline: the driver then never advertises a spooled
-        // encoding, so the coordinator pages rows inline even when
-        // protocol.spooling.enabled=true on the server.
+        // "none" leaves the property unset. That does NOT opt out of
+        // spooling: the 478 driver negotiates a spooled encoding on its own
+        // whenever the server offers one, so an unset property against a
+        // spooling-enabled server still spools (measured: 15.8s and a 3.7 KB
+        // coordinator outputDataSize, versus 48.6s and 234 MiB inline).
+        // A genuine baseline therefore requires protocol.spooling.enabled=
+        // false on the server, which is what Profile A does.
         if (!"none".equals(encoding)) {
             props.setProperty("encoding", encoding);
         }

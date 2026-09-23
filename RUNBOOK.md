@@ -148,8 +148,10 @@ docker exec trino-spool trino --execute \
 ./bench/run-ab.sh baseline none
 ```
 
-`--encoding none` leaves the JDBC `encoding` property unset, so the driver
-never advertises a spooled encoding. Each iteration opens a fresh connection,
+`--encoding none` leaves the JDBC `encoding` property unset. What makes this
+a baseline is the *server* profile, not that flag — the driver would negotiate
+spooling on its own if the server offered it (see Troubleshooting). Each
+iteration opens a fresh connection,
 drains all 100k rows, and calls `getObject` on every one of the 265 columns so
 deserialization cost is genuinely paid rather than optimized away. Two warmups
 are discarded — the first run is consistently a JIT/connection outlier — and
@@ -201,6 +203,43 @@ grep -o '"outputDataSize":"[^"]*"' results/*.tsv.stats.json
 
 The second is definitive: `outputDataSize` is what the coordinator served to
 the client.
+
+### Checking from a Java JDBC client
+
+There is no public JDBC API for this. `QueryStats` (via
+`TrinoResultSet.getStats()`) carries 25 getters and none of them mention
+spooling, segments, or the negotiated encoding, and `TrinoResultSet` itself
+adds only `getQueryId`, `getStats`, and `getWarnings`. Nor does a mismatch
+announce itself: a client requesting `encoding=json+zstd` against a server
+with spooling **disabled** completes normally, with no `SQLException`, no
+`SQLWarning`, and client-side stats identical to a spooled run. Enabling
+`spooling_unsupported_warning` — as a session property and as
+`protocol.spooling.unsupported-warning.enabled` server-side — produced no
+client-visible warning in 478 either.
+
+Two checks that do work:
+
+```java
+// (a) Is the SERVER capable? Pure JDBC, no side channel.
+//     6 rows when protocol.spooling.enabled=true, 1 row when false.
+try (ResultSet r = stmt.executeQuery("SHOW SESSION LIKE 'spooling%'")) {
+    while (r.next()) System.out.println(r.getString(1) + " = " + r.getString(2));
+}
+
+// (b) Did THIS query spool? Take the query id the driver exposes, then read
+//     the coordinator's own stats. outputDataSize is what the coordinator
+//     served; if the rows went through object storage it collapses to the
+//     size of the segment handles.
+String queryId = rs.unwrap(io.trino.jdbc.TrinoResultSet.class).getQueryId();
+// GET http://<coordinator>/v1/query/{queryId}
+//   spooled : processedInputDataSize=245575378B  outputDataSize=3726B
+//   inline  : processedInputDataSize=245575378B  outputDataSize=245575378B
+```
+
+Check (b) needs a result large enough to clear the inlining threshold
+(`spooling_inlining_max_rows`, default 50,000). Below it, spooling is working
+correctly and still reporting a large `outputDataSize`, because small results
+are deliberately served inline.
 
 ---
 
@@ -299,8 +338,18 @@ Only the spool prefix needs S3 rights.
 Regenerate with `openssl rand -base64 32` — not 16, not 64.
 
 **Numbers look identical between profiles**
-Check that the client is actually requesting a spooled encoding. Server-side
-`protocol.spooling.enabled=true` alone changes nothing: a driver that does not
-send an `encoding` property still gets the classic inline protocol. That is
-exactly what makes Profile A a valid baseline on an unchanged server, and it
-is also the easiest way to think you have tested spooling when you have not.
+Check that the server profile actually changed. Toggling the *client* encoding
+is not enough to produce a baseline — see below.
+
+**Omitting the JDBC `encoding` property does not disable spooling**
+The 478 driver negotiates a spooled encoding on its own whenever the server
+offers one. Measured against a spooling-enabled server, a client that sets no
+`encoding` property still spooled: 15.8 s with a 3,726 B coordinator
+`outputDataSize`, against 48.6 s and 245,575,378 B with spooling disabled
+server-side. So a real baseline requires `protocol.spooling.enabled=false` on
+the server, which is what Profile A does.
+
+Two consequences. An A/B that only varies the client property measures
+nothing. And since the negotiated default behaves like `json+zstd` here — the
+*slowest* of the three encodings on a fast network — leaving `encoding` unset
+costs roughly half the available speedup. Set it explicitly.
