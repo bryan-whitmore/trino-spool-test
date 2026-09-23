@@ -1,0 +1,28 @@
+networks:
+  proxy:
+    name: proxy
+    external: true
+
+services:
+  trino-spool:
+    container_name: trino-spool
+    image: trinodb/trino:${TRINO_VERSION}
+    restart: unless-stopped
+    platform: linux/amd64
+    ports:
+      # Default Trino port. The pre-existing 'trino' container publishes
+      # 18080, so 8080 is free and the JDBC URLs stay conventional.
+      - 8080:8080
+    networks:
+      - proxy
+    volumes:
+      # Whole config tree is bind-mounted so switching profiles is a file
+      # swap on the host plus a restart -- no image rebuild.
+      - ./etc:/etc/trino
+      - ./trino-vast-5.5.0:/usr/lib/trino/plugin/vast:ro
+    healthcheck:
+      test: ["CMD", "trino", "--execute", "SELECT 1"]
+      interval: 15s
+      timeout: 30s
+      retries: 20
+      start_period: 30s

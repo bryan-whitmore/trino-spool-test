@@ -1,0 +1,14 @@
+# Secrets and rendered config -- never commit.
+.env
+.spool-secret
+etc/config.properties
+etc/spooling-manager.properties
+etc/catalog/
+
+# Connector is fetched from the release URL, not vendored.
+trino-vast-*/
+*.zip
+
+# Measurement output (embeds the query text and cluster query ids).
+results/
+bench/*.class
